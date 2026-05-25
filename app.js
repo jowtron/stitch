@@ -48,10 +48,8 @@ $("#define-masks").addEventListener("click", openMaskModal);
 $("#mask-done").addEventListener("click", () => $("#mask-modal").hidden = true);
 updateMaskCount();
 
-// Output format controls
-detectAvifSupport().then((ok) => {
-  if (!ok) $("#format").querySelector('option[value="image/avif"]').remove();
-});
+// Output format controls — AVIF stays in the list even if native encoding is missing;
+// we lazy-load a WASM encoder fallback when needed.
 $("#format").addEventListener("change", reencodeOutput);
 $("#quality").addEventListener("input", () => {
   $("#quality-val").textContent = Math.round(parseFloat($("#quality").value) * 100) + "%";
@@ -180,14 +178,49 @@ function updateQualityRowVisibility() {
   $("#quality-row").style.display = isLossy(mime) ? "inline-flex" : "none";
 }
 
-async function detectAvifSupport() {
-  try {
-    const c = document.createElement("canvas");
-    c.width = 2; c.height = 2;
-    c.getContext("2d").fillRect(0, 0, 2, 2);
-    const blob = await new Promise((res) => c.toBlob(res, "image/avif", 0.8));
-    return !!(blob && blob.type === "image/avif");
-  } catch (e) { return false; }
+// Lazy-loaded WASM encoders (loaded on first non-PNG-and-non-native use).
+const wasmEncoders = {
+  "image/webp": null,
+  "image/avif": null,
+};
+
+async function loadWasmEncoder(mime) {
+  if (wasmEncoders[mime]) return wasmEncoders[mime];
+  const url = {
+    "image/webp": "https://esm.sh/@jsquash/webp@1.4.0",
+    "image/avif": "https://esm.sh/@jsquash/avif@2.1.1",
+  }[mime];
+  if (!url) return null;
+  const mod = await import(/* @vite-ignore */ url);
+  wasmEncoders[mime] = mod.encode || mod.default;
+  return wasmEncoders[mime];
+}
+
+async function encodeCanvas(canvas, mime, quality) {
+  // 1) Try native canvas.toBlob first — fast when supported.
+  const native = await new Promise((res) => canvas.toBlob(res, mime, quality));
+  if (native && native.type === mime) return native;
+
+  // 2) Safari (and any browser missing native support for WebP/AVIF encoding)
+  //    silently returns PNG. Detect via blob.type mismatch and route to WASM.
+  if (mime === "image/webp" || mime === "image/avif") {
+    setStatus(`Encoding ${mime.split("/")[1].toUpperCase()} via WASM (your browser can't encode this natively)…`);
+    const enc = await loadWasmEncoder(mime);
+    if (!enc) throw new Error(`Failed to load ${mime} encoder`);
+    const ctx = canvas.getContext("2d");
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let buf;
+    if (mime === "image/webp") {
+      buf = await enc(imageData, { quality: Math.round(quality * 100) });
+    } else {
+      // AVIF: cqLevel is inverted (0=best, 63=worst); speed 8 keeps it tolerable
+      buf = await enc(imageData, { cqLevel: Math.round((1 - quality) * 63), speed: 8 });
+    }
+    return new Blob([buf], { type: mime });
+  }
+
+  // 3) Unknown mime — fall back to PNG.
+  return native;
 }
 
 async function reencodeOutput() {
@@ -196,20 +229,36 @@ async function reencodeOutput() {
   const mime = $("#format").value;
   const quality = parseFloat($("#quality").value);
   const canvas = state.lastCanvas;
-  const blob = await new Promise((res) => canvas.toBlob(res, mime, quality));
-  if (!blob) {
-    setStatus(`Browser refused to encode ${mime}. Falling back to PNG.`, true);
-    $("#format").value = "image/png";
-    return reencodeOutput();
+  downloadBtn.style.pointerEvents = "none";
+  downloadBtn.style.opacity = "0.5";
+  let blob;
+  try {
+    const t0 = performance.now();
+    blob = await encodeCanvas(canvas, mime, quality);
+    const dt = Math.round(performance.now() - t0);
+    if (!blob) throw new Error("encoder returned null");
+    if (blob.type !== mime) {
+      setStatus(`Your browser returned ${blob.type} instead of ${mime}. Try a different format.`, true);
+    }
+    if (downloadBtn.href.startsWith("blob:")) URL.revokeObjectURL(downloadBtn.href);
+    const url = URL.createObjectURL(blob);
+    output.src = url;
+    downloadBtn.href = url;
+    downloadBtn.download = `stitched.${extensionFor(blob.type)}`;
+    const sizeKb = Math.round(blob.size / 1024);
+    const fmtLabel = blob.type.split("/")[1].toUpperCase();
+    const meta = `${canvas.width}×${canvas.height}px · ${sizeKb} KB · ${fmtLabel}${isLossy(blob.type) ? ` @${Math.round(quality*100)}%` : ""} · ${dt}ms`;
+    document.querySelector(".result-meta").textContent = meta;
+  } catch (err) {
+    setStatus(`Encoding failed: ${err.message}. Falling back to PNG.`, true);
+    if ($("#format").value !== "image/png") {
+      $("#format").value = "image/png";
+      return reencodeOutput();
+    }
+  } finally {
+    downloadBtn.style.pointerEvents = "";
+    downloadBtn.style.opacity = "";
   }
-  if (downloadBtn.href.startsWith("blob:")) URL.revokeObjectURL(downloadBtn.href);
-  const url = URL.createObjectURL(blob);
-  output.src = url;
-  downloadBtn.href = url;
-  downloadBtn.download = `stitched.${extensionFor(mime)}`;
-  const sizeKb = Math.round(blob.size / 1024);
-  const meta = `${canvas.width}×${canvas.height}px · ${sizeKb} KB · ${mime.split("/")[1].toUpperCase()}${isLossy(mime) ? ` @${Math.round(quality*100)}%` : ""}`;
-  document.querySelector(".result-meta").textContent = meta;
 }
 
 // ----- Mask modal -----
