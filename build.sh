@@ -16,10 +16,11 @@ else
   HASH="dev"
 fi
 
-mkdir -p dist
+mkdir -p dist dist/icons
 # Substitute {{GIT_HASH}} → real hash. sed delimiter '|' avoids escaping '/' in hashes.
 sed "s|{{GIT_HASH}}|${HASH}|g" index.html > dist/index.html
-cp app.js style.css dist/
+cp app.js style.css manifest.json dist/
+cp icons/*.png dist/icons/
 
 echo "Built dist/ with hash: ${HASH}"
 

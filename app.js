@@ -19,6 +19,17 @@ const state = {
   lastCanvas: null,
 };
 
+// Format profiles: dropdown value → { mime, encoder } where encoder is
+// "native" (always canvas.toBlob), "wasm-mozjpeg" (always WASM), or "auto"
+// (native preferred, WASM fallback if browser silently returned wrong mime).
+const FORMAT_PROFILES = {
+  "png":          { mime: "image/png",  encoder: "native" },
+  "jpeg-fast":    { mime: "image/jpeg", encoder: "native" },
+  "jpeg-quality": { mime: "image/jpeg", encoder: "wasm-mozjpeg" },
+  "webp":         { mime: "image/webp", encoder: "auto" },
+  "avif":         { mime: "image/avif", encoder: "auto" },
+};
+
 // ----- UI wiring -----
 
 const drop = $("#drop");
@@ -173,60 +184,84 @@ function extensionFor(mime) {
 }
 function isLossy(mime) { return mime !== "image/png"; }
 
+function profileMime(key) { return (FORMAT_PROFILES[key] || FORMAT_PROFILES.png).mime; }
+
 function updateQualityRowVisibility() {
-  const mime = $("#format").value;
+  const mime = profileMime($("#format").value);
   $("#quality-row").style.display = isLossy(mime) ? "inline-flex" : "none";
 }
 
-// Lazy-loaded WASM encoders (loaded on first non-PNG-and-non-native use).
+// Lazy-loaded WASM encoders (loaded on first use).
 const wasmEncoders = {
   "image/webp": null,
   "image/avif": null,
+  "image/jpeg": null, // mozjpeg
 };
+
+// (Moved FORMAT_PROFILES definition higher up — see top of file.)
 
 async function loadWasmEncoder(mime) {
   if (wasmEncoders[mime]) return wasmEncoders[mime];
   const url = {
     "image/webp": "https://esm.sh/@jsquash/webp@1.4.0",
     "image/avif": "https://esm.sh/@jsquash/avif@2.1.1",
+    "image/jpeg": "https://esm.sh/@jsquash/jpeg@1.5.0",
   }[mime];
   if (!url) return null;
   const mod = await import(/* @vite-ignore */ url);
-  wasmEncoders[mime] = mod.encode || mod.default;
+  wasmEncoders[mime] = mod.encode || (mod.default && mod.default.encode);
   return wasmEncoders[mime];
 }
 
-async function encodeCanvas(canvas, mime, quality) {
-  // 1) Try native canvas.toBlob first — fast when supported.
-  const native = await new Promise((res) => canvas.toBlob(res, mime, quality));
-  if (native && native.type === mime) return native;
+async function encodeViaWasm(canvas, mime, quality) {
+  const enc = await loadWasmEncoder(mime);
+  if (!enc) throw new Error(`Failed to load ${mime} encoder`);
+  const ctx = canvas.getContext("2d");
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const q100 = Math.round(quality * 100);
+  let buf;
+  if (mime === "image/webp")      buf = await enc(imageData, { quality: q100 });
+  else if (mime === "image/avif") buf = await enc(imageData, { quality: q100, speed: 6 });
+  else if (mime === "image/jpeg") buf = await enc(imageData, {
+    quality: q100,
+    progressive: true,
+    optimize_coding: true,
+    trellis_multipass: true,   // exhaustive RDO — slower, but the whole point of this option
+    trellis_opt_zero: true,
+    trellis_opt_table: true,
+  });
+  else throw new Error(`No WASM encoder for ${mime}`);
+  return new Blob([buf], { type: mime });
+}
 
-  // 2) Safari (and any browser missing native support for WebP/AVIF encoding)
-  //    silently returns PNG. Detect via blob.type mismatch and route to WASM.
-  if (mime === "image/webp" || mime === "image/avif") {
-    setStatus(`Encoding ${mime.split("/")[1].toUpperCase()} via WASM (your browser can't encode this natively)…`);
-    const enc = await loadWasmEncoder(mime);
-    if (!enc) throw new Error(`Failed to load ${mime} encoder`);
-    const ctx = canvas.getContext("2d");
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    let buf;
-    if (mime === "image/webp") {
-      buf = await enc(imageData, { quality: Math.round(quality * 100) });
-    } else {
-      // AVIF v2 takes quality: 0-100 (same convention as WebP). speed: 6 is the jsquash default.
-      buf = await enc(imageData, { quality: Math.round(quality * 100), speed: 6 });
-    }
-    return new Blob([buf], { type: mime });
+async function encodeCanvas(profileKey, canvas, quality) {
+  const profile = FORMAT_PROFILES[profileKey] || FORMAT_PROFILES.png;
+  const { mime, encoder } = profile;
+
+  if (encoder === "wasm-mozjpeg") {
+    setStatus(`Encoding with mozjpeg — slower but better quality at the same file size…`);
+    return await encodeViaWasm(canvas, "image/jpeg", quality);
   }
 
-  // 3) Unknown mime — fall back to PNG.
+  if (encoder === "native") {
+    return await new Promise((res) => canvas.toBlob(res, mime, quality));
+  }
+
+  // "auto": try native first; if browser silently returns wrong type, fall back to WASM
+  const native = await new Promise((res) => canvas.toBlob(res, mime, quality));
+  if (native && native.type === mime) return native;
+  if (mime === "image/webp" || mime === "image/avif") {
+    setStatus(`Encoding ${mime.split("/")[1].toUpperCase()} via WASM (your browser can't encode this natively)…`);
+    return await encodeViaWasm(canvas, mime, quality);
+  }
   return native;
 }
 
 async function reencodeOutput() {
   updateQualityRowVisibility();
   if (!state.lastCanvas) return;
-  const mime = $("#format").value;
+  const profileKey = $("#format").value;
+  const expectedMime = profileMime(profileKey);
   const quality = parseFloat($("#quality").value);
   const canvas = state.lastCanvas;
   downloadBtn.style.pointerEvents = "none";
@@ -234,11 +269,11 @@ async function reencodeOutput() {
   let blob;
   try {
     const t0 = performance.now();
-    blob = await encodeCanvas(canvas, mime, quality);
+    blob = await encodeCanvas(profileKey, canvas, quality);
     const dt = Math.round(performance.now() - t0);
     if (!blob) throw new Error("encoder returned null");
-    if (blob.type !== mime) {
-      setStatus(`Your browser returned ${blob.type} instead of ${mime}. Try a different format.`, true);
+    if (blob.type !== expectedMime) {
+      setStatus(`Browser returned ${blob.type} instead of ${expectedMime}. Try a different format.`, true);
     }
     if (downloadBtn.href.startsWith("blob:")) URL.revokeObjectURL(downloadBtn.href);
     const url = URL.createObjectURL(blob);
@@ -246,13 +281,15 @@ async function reencodeOutput() {
     downloadBtn.href = url;
     downloadBtn.download = `stitched.${extensionFor(blob.type)}`;
     const sizeKb = Math.round(blob.size / 1024);
-    const fmtLabel = blob.type.split("/")[1].toUpperCase();
-    const meta = `${canvas.width}×${canvas.height}px · ${sizeKb} KB · ${fmtLabel}${isLossy(blob.type) ? ` @${Math.round(quality*100)}%` : ""} · ${dt}ms`;
+    const variantLabel = profileKey === "jpeg-quality" ? "JPEG (mozjpeg)"
+                       : profileKey === "jpeg-fast"    ? "JPEG (fast)"
+                       : blob.type.split("/")[1].toUpperCase();
+    const meta = `${canvas.width}×${canvas.height}px · ${sizeKb} KB · ${variantLabel}${isLossy(blob.type) ? ` @${Math.round(quality*100)}%` : ""} · ${dt}ms`;
     document.querySelector(".result-meta").textContent = meta;
   } catch (err) {
     setStatus(`Encoding failed: ${err.message}. Falling back to PNG.`, true);
-    if ($("#format").value !== "image/png") {
-      $("#format").value = "image/png";
+    if ($("#format").value !== "png") {
+      $("#format").value = "png";
       return reencodeOutput();
     }
   } finally {

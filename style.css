@@ -31,8 +31,23 @@ header h1 {
   font-size: 28px;
   margin: 0 0 6px;
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
+  gap: 12px;
+}
+.app-icon {
+  display: inline-block;
+  width: 48px;
+  height: 48px;
+  vertical-align: middle;
+  flex: 0 0 auto;
+}
+/* Hide the app icon on narrow viewports and when installed as a PWA */
+@media (max-width: 640px), (display-mode: standalone) {
+  .app-icon { display: none; }
+}
+header h1 span:not(.build-hash) {
+  /* keep the title text baseline-aligned with the hash chip */
+  align-self: baseline;
 }
 .build-hash {
   font: 500 11px/1 var(--mono);
