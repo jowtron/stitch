@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Stitch · combine messaging-app screenshots</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Stitch <span class="build-hash" title="build hash">{{GIT_HASH}}</span></h1>
+      <p class="tag">Drop a sequence of overlapping messaging-app screenshots — get one tall image. All processing happens in your browser; nothing is uploaded.</p>
+    </header>
+
+    <section id="drop" class="dropzone">
+      <p><strong>Drop screenshots here</strong> or <label for="file" class="link">choose files</label></p>
+      <input id="file" type="file" accept="image/png,image/jpeg" multiple hidden />
+      <p class="hint">Tip: filenames sort alphabetically (e.g. <code>IMG_2733.PNG → IMG_2738.PNG</code>). You can drag to reorder below.</p>
+    </section>
+
+    <section id="thumbs" class="thumbs" hidden></section>
+
+    <section id="controls" class="controls" hidden>
+      <details>
+        <summary>Advanced</summary>
+        <label>Chrome tolerance <input id="tolerance" type="number" min="0" max="64" value="8" /></label>
+        <label>Strip height (px) <input id="strip" type="number" min="50" max="600" value="200" /></label>
+        <label>Subsample step <input id="step" type="number" min="1" max="8" value="2" /></label>
+        <label><input id="override-chrome" type="checkbox" /> manual chrome heights</label>
+        <label class="manual">top px <input id="top-chrome" type="number" min="0" value="0" disabled /></label>
+        <label class="manual">bottom px <input id="bot-chrome" type="number" min="0" value="0" disabled /></label>
+        <label><input id="mask-overlays" type="checkbox" checked /> auto-mask floating UI overlays (e.g. WhatsApp scroll chevron)</label>
+        <label><input id="mask-scrollbar" type="checkbox" checked /> remove right-edge scroll indicator</label>
+        <label><button id="define-masks" type="button" class="secondary">Define masks manually…</button> <span id="mask-count" class="muted"></span></label>
+      </details>
+      <div class="actions">
+        <button id="stitch" type="button">Stitch <span id="count"></span></button>
+        <button id="clear" type="button" class="secondary">Clear</button>
+      </div>
+    </section>
+
+    <section id="status" class="status" aria-live="polite"></section>
+
+    <section id="result" class="result" hidden>
+      <div class="result-head">
+        <h2>Result</h2>
+        <div class="result-meta"></div>
+        <div class="format-controls">
+          <label>
+            Format
+            <select id="format">
+              <option value="image/png">PNG</option>
+              <option value="image/jpeg">JPEG</option>
+              <option value="image/webp">WebP</option>
+              <option value="image/avif">AVIF</option>
+            </select>
+          </label>
+          <label id="quality-row">
+            Quality <input id="quality" type="range" min="0.3" max="1" step="0.05" value="0.9" />
+            <span id="quality-val">90%</span>
+          </label>
+          <a id="download" class="btn" download="stitched.png">Download</a>
+        </div>
+      </div>
+      <div class="result-img">
+        <img id="output" alt="stitched output" />
+      </div>
+    </section>
+
+    <div id="mask-modal" class="modal" hidden>
+      <div class="modal-panel">
+        <header class="modal-head">
+          <strong>Drag to mark areas to mask</strong>
+          <span class="muted">Click an existing box to remove it. The same coords will be applied to every screenshot, since floating UI sits at a fixed screen position.</span>
+          <button id="mask-done" type="button">Done</button>
+        </header>
+        <div class="modal-body">
+          <div id="mask-stage" class="mask-stage">
+            <img id="mask-img" alt="" />
+            <canvas id="mask-canvas"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      <p>Built for personal use. <a href="https://github.com">Source</a></p>
+    </footer>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

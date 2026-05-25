@@ -1,0 +1,6 @@
+IMG_*.PNG
+IMG_*.JPG
+IMG_*.JPEG
+dist/
+node_modules/
+.wrangler/
