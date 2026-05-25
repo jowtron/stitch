@@ -213,8 +213,8 @@ async function encodeCanvas(canvas, mime, quality) {
     if (mime === "image/webp") {
       buf = await enc(imageData, { quality: Math.round(quality * 100) });
     } else {
-      // AVIF: cqLevel is inverted (0=best, 63=worst); speed 8 keeps it tolerable
-      buf = await enc(imageData, { cqLevel: Math.round((1 - quality) * 63), speed: 8 });
+      // AVIF v2 takes quality: 0-100 (same convention as WebP). speed: 6 is the jsquash default.
+      buf = await enc(imageData, { quality: Math.round(quality * 100), speed: 6 });
     }
     return new Blob([buf], { type: mime });
   }
