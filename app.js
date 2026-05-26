@@ -548,7 +548,7 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
   const nPairs = images.length - 1;
   const minVotes = opts.minVotes ?? Math.max(2, Math.floor(nPairs / 2) + 1);
   const erodeIter = opts.erodeIter ?? 3;
-  const minArea = opts.minArea ?? 3000;     // overlay button is at least this many px
+  const minArea = opts.minArea ?? 1500;     // overlay button is at least this many px
   const maxArea = opts.maxArea ?? 40000;
   const maxDim = opts.maxDim ?? 250;
   const minFill = opts.minFill ?? 0.35;
@@ -944,6 +944,15 @@ async function runStitch() {
     }
     if (interesting.length > shown.length) {
       diag.push(`  … ${interesting.length - shown.length} more near-miss rejection(s) suppressed`);
+    }
+    // Always surface the top-5 largest rejected components regardless of size
+    // filter — useful when the chevron is fragmenting or appearing huge.
+    const top = [...allRej].sort((a, b) => b.area - a.area).slice(0, 5);
+    if (top.length) {
+      diag.push(`  top-5 largest rejected (any size):`);
+      for (const ov of top) {
+        diag.push(`    rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} (area=${ov.area}) — ${ov.reason}`);
+      }
     }
     allOverlays.push(...auto);
   }
