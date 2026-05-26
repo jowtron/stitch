@@ -947,10 +947,10 @@ async function runStitch() {
     }
     // Always surface the top-5 largest rejected components regardless of size
     // filter — useful when the chevron is fragmenting or appearing huge.
-    const top = [...allRej].sort((a, b) => b.area - a.area).slice(0, 5);
-    if (top.length) {
+    const biggest = [...allRej].sort((a, b) => b.area - a.area).slice(0, 5);
+    if (biggest.length) {
       diag.push(`  top-5 largest rejected (any size):`);
-      for (const ov of top) {
+      for (const ov of biggest) {
         diag.push(`    rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} (area=${ov.area}) — ${ov.reason}`);
       }
     }
