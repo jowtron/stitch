@@ -544,17 +544,17 @@ function findOverlap(a, b, topChrome, botChrome, stripH, step) {
  *  consecutive pairs in the scrollable area. Returns array of bounding boxes
  *  in image coordinates: [{ y1, y2, x1, x2, area }]. */
 function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
-  const tolerance = opts.tolerance ?? 8;
+  const tolerance = opts.tolerance ?? 0;
   const nPairs = images.length - 1;
   const minVotes = opts.minVotes ?? Math.max(2, Math.floor(nPairs / 2) + 1);
   const erodeIter = opts.erodeIter ?? 3;
-  const minArea = opts.minArea ?? 1500;     // overlay button is at least this many px
+  const minArea = opts.minArea ?? 3000;     // overlay button is at least this many px
   const maxArea = opts.maxArea ?? 40000;
   const maxDim = opts.maxDim ?? 250;
-  const minFill = opts.minFill ?? 0.25;
+  const minFill = opts.minFill ?? 0.35;
   const minAspect = opts.minAspect ?? 0.5;   // bbox short/long must be at least this
   const requireEdge = opts.requireEdge ?? true; // must touch left or right edge of screen
-  const edgeMargin = opts.edgeMargin ?? 100; // "edge" = within this many px of border (WhatsApp chevron floats ~80px in)
+  const edgeMargin = opts.edgeMargin ?? 30;  // "edge" = within this many px of border
 
   const W = images[0].w, H = images[0].h;
   const votes = new Uint8Array(W * H);
@@ -597,7 +597,6 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
   // Connected components (BFS, 4-connectivity)
   const labels = new Int32Array(W * H);
   const boxes = [];
-  const rejected = [];
   const queue = new Int32Array(W * H);
   let nextLabel = 0;
 
@@ -629,15 +628,11 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
       const fill = area / bboxArea;
       const aspect = Math.min(bw, bh) / Math.max(bw, bh);
       const touchesEdge = (x1 <= edgeMargin) || (x2 >= W - 1 - edgeMargin);
-      const cand = { y1, y2, x1, x2, area, fill, aspect, bw, bh, touchesEdge };
-      let reason = null;
-      if (area < minArea) reason = `area ${area} < ${minArea}`;
-      else if (area > maxArea) reason = `area ${area} > ${maxArea}`;
-      else if (Math.max(bw, bh) > maxDim) reason = `dim ${Math.max(bw, bh)} > ${maxDim}`;
-      else if (fill < minFill) reason = `fill ${(fill*100).toFixed(0)}% < ${(minFill*100)|0}%`;
-      else if (aspect < minAspect) reason = `aspect ${aspect.toFixed(2)} < ${minAspect}`;
-      else if (requireEdge && !touchesEdge) reason = `not touching edge (x ${x1}-${x2}, W=${W})`;
-      if (reason) { rejected.push({ ...cand, reason }); continue; }
+      if (area < minArea || area > maxArea) continue;
+      if (Math.max(bw, bh) > maxDim) continue;
+      if (fill < minFill) continue;
+      if (aspect < minAspect) continue;
+      if (requireEdge && !touchesEdge) continue;
       boxes.push({ y1, y2, x1, x2, area, fill, aspect });
     }
   }
@@ -657,39 +652,22 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
   // are nearly uniform dark color, so they fail this check.
   // Use the per-image (image 1, which usually has overlays present) bbox to
   // compute brightness range. Keep if range > threshold.
-  // Contrast filter: look at max(R, G, B, luma) range across ALL images. This
-  // way a coloured-but-dark chevron (dark-mode WhatsApp green badge on dark
-  // bg) spikes in a single channel even when luminance is flat, and a chevron
-  // that's clearer in one frame than another still gets through.
-  const minBrightnessRange = opts.minBrightnessRange ?? 40;
-  const allData = images.map((im) => getImageData(im).data);
-  const accepted = [];
-  for (const b of padded) {
-    let bestRange = 0;
-    for (const d of allData) {
-      let minR = 255, maxR = 0, minG = 255, maxG = 0, minBl = 255, maxBl = 0, minL = 255, maxL = 0;
-      for (let y = b.y1; y <= b.y2; y++) {
-        const rowOff = y * W * 4;
-        for (let x = b.x1; x <= b.x2; x++) {
-          const i = rowOff + x * 4;
-          const r = d[i], g = d[i + 1], bl = d[i + 2];
-          if (r < minR) minR = r; if (r > maxR) maxR = r;
-          if (g < minG) minG = g; if (g > maxG) maxG = g;
-          if (bl < minBl) minBl = bl; if (bl > maxBl) maxBl = bl;
-          const lum = (r * 299 + g * 587 + bl * 114 + 500) / 1000;
-          if (lum < minL) minL = lum; if (lum > maxL) maxL = lum;
-        }
+  const minBrightnessRange = opts.minBrightnessRange ?? 80;
+  const refImg = images[Math.min(1, images.length - 1)];
+  const refData = getImageData(refImg).data;
+  return padded.filter((b) => {
+    let minB = 255, maxB = 0;
+    for (let y = b.y1; y <= b.y2; y++) {
+      const rowOff = y * W * 4;
+      for (let x = b.x1; x <= b.x2; x++) {
+        const i = rowOff + x * 4;
+        const lum = (refData[i] * 299 + refData[i + 1] * 587 + refData[i + 2] * 114 + 500) / 1000;
+        if (lum < minB) minB = lum;
+        if (lum > maxB) maxB = lum;
       }
-      const r = Math.max(maxR - minR, maxG - minG, maxBl - minBl, maxL - minL);
-      if (r > bestRange) bestRange = r;
-      if (bestRange >= minBrightnessRange) break; // early exit, save time
     }
-    if (bestRange >= minBrightnessRange) accepted.push(b);
-    else rejected.push({ ...b, reason: `channel range ${bestRange|0} < ${minBrightnessRange} (all images)` });
-  }
-  accepted.rejected = rejected;
-  accepted.params = { tolerance, minVotes, nPairs, minArea, maxArea, maxDim, minFill, minAspect, requireEdge, minBrightnessRange };
-  return accepted;
+    return (maxB - minB) >= minBrightnessRange;
+  });
 }
 
 /** Patch the output canvas: for each overlay box and each image that contributed
@@ -731,63 +709,13 @@ function inpaintOverlays(canvas, images, slices, overlays, topChrome, botChrome)
         const yM2 = yK2 + imgShift;
         // Must be entirely in scrollable area
         if (yM1 < topChrome || yM2 >= Ho - botChrome) continue;
-        // Must be entirely outside ALL overlay regions in the same screen
-        // coords. Reading into another overlay's bbox copies that UI element
-        // into the current overlay's position — looks like the chevron is
-        // never erased because we're patching one chevron-region with pixels
-        // from a sibling chevron-region.
-        const xMin = ov.x1, xMax = ov.x2;
-        const conflicts = overlays.some((o) =>
-          yM2 >= o.y1 && yM1 <= o.y2 && xMax >= o.x1 && xMin <= o.x2
-        );
-        if (conflicts) continue;
+        // Must be entirely outside this other image's overlay region (same overlay bbox, same screen coords)
+        const inOverlay = (yMin, yMax) => yMax >= ov.y1 && yMin <= ov.y2;
+        if (inOverlay(yM1, yM2)) continue;
         chosen = { other, otherImg, otherData: imgData[oi], imgShift };
         break;
       }
-      if (!chosen) {
-        // Fallback: no clean neighbor available (e.g. chevron near top of
-        // first slice — chat content under it never appears unoccluded in any
-        // later frame). Fill the bbox with the median colour sampled from a
-        // strip just above + just below the bbox, in the same image, within
-        // the same columns. Works well when the underlying region is roughly
-        // uniform chat wallpaper.
-        const sameData = imgData[si];
-        const Ho_self = images[sl.idx].h;
-        const STRIP = 10;
-        const samplesR = [], samplesG = [], samplesB = [];
-        const sampleRow = (y) => {
-          if (y < topChrome || y >= Ho_self - botChrome) return;
-          const rowOff = y * W * 4;
-          for (let x = ov.x1; x <= ov.x2; x++) {
-            const i = rowOff + x * 4;
-            samplesR.push(sameData[i]);
-            samplesG.push(sameData[i + 1]);
-            samplesB.push(sameData[i + 2]);
-          }
-        };
-        for (let dy = 1; dy <= STRIP; dy++) {
-          sampleRow(yK1 - dy);
-          sampleRow(yK2 + dy);
-        }
-        if (samplesR.length === 0) continue;
-        samplesR.sort((a, b) => a - b);
-        samplesG.sort((a, b) => a - b);
-        samplesB.sort((a, b) => a - b);
-        const mid = samplesR.length >> 1;
-        const fillR = samplesR[mid], fillG = samplesG[mid], fillB = samplesB[mid];
-        for (let outY = shift[si] + yK1; outY <= shift[si] + yK2; outY++) {
-          const outRow = outY * W * 4;
-          for (let x = ov.x1; x <= ov.x2; x++) {
-            const oi4 = outRow + x * 4;
-            out.data[oi4]     = fillR;
-            out.data[oi4 + 1] = fillG;
-            out.data[oi4 + 2] = fillB;
-            out.data[oi4 + 3] = 255;
-          }
-        }
-        patched++;
-        continue;
-      }
+      if (!chosen) continue;
 
       const { otherData, imgShift } = chosen;
       const Ho = chosen.otherImg.h;
@@ -987,33 +915,9 @@ async function runStitch() {
   if (autoOn) {
     const t0 = performance.now();
     const auto = detectOverlayBoxes(images, top, bot);
-    const p = auto.params || {};
-    const allRej = auto.rejected || [];
-    // Only show "interesting" rejections: roughly chevron-sized candidates that
-    // failed near a threshold. Drop 1-px noise and giant background blobs.
-    const interesting = allRej.filter((r) =>
-      r.area >= 500 && r.area <= 200000 && Math.max((r.x2 - r.x1 + 1), (r.y2 - r.y1 + 1)) <= 500
-    );
-    diag.push(`auto overlay detection: ${auto.length} accepted, ${allRej.length} rejected (${interesting.length} near-miss) [${Math.round(performance.now() - t0)}ms]`);
-    diag.push(`  params: pairs=${p.nPairs}, minVotes=${p.minVotes}, tolerance=${p.tolerance}`);
+    diag.push(`auto overlay detection: ${auto.length} candidate(s) [${Math.round(performance.now() - t0)}ms]`);
     for (const ov of auto) {
-      diag.push(`  ✓ rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} (area=${ov.area}, fill=${(ov.fill*100).toFixed(0)}%)`);
-    }
-    const shown = interesting.slice(0, 12);
-    for (const ov of shown) {
-      diag.push(`  ✗ rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} (area=${ov.area}) — ${ov.reason}`);
-    }
-    if (interesting.length > shown.length) {
-      diag.push(`  … ${interesting.length - shown.length} more near-miss rejection(s) suppressed`);
-    }
-    // Always surface the top-5 largest rejected components regardless of size
-    // filter — useful when the chevron is fragmenting or appearing huge.
-    const biggest = [...allRej].sort((a, b) => b.area - a.area).slice(0, 5);
-    if (biggest.length) {
-      diag.push(`  top-5 largest rejected (any size):`);
-      for (const ov of biggest) {
-        diag.push(`    rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} (area=${ov.area}) — ${ov.reason}`);
-      }
+      diag.push(`  auto: rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} (area=${ov.area}, fill=${(ov.fill*100).toFixed(0)}%)`);
     }
     allOverlays.push(...auto);
   }
