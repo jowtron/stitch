@@ -657,24 +657,35 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
   // are nearly uniform dark color, so they fail this check.
   // Use the per-image (image 1, which usually has overlays present) bbox to
   // compute brightness range. Keep if range > threshold.
-  const minBrightnessRange = opts.minBrightnessRange ?? 80;
-  const refImg = images[Math.min(1, images.length - 1)];
-  const refData = getImageData(refImg).data;
+  // Contrast filter: look at max(R, G, B, luma) range across ALL images. This
+  // way a coloured-but-dark chevron (dark-mode WhatsApp green badge on dark
+  // bg) spikes in a single channel even when luminance is flat, and a chevron
+  // that's clearer in one frame than another still gets through.
+  const minBrightnessRange = opts.minBrightnessRange ?? 40;
+  const allData = images.map((im) => getImageData(im).data);
   const accepted = [];
   for (const b of padded) {
-    let minB = 255, maxB = 0;
-    for (let y = b.y1; y <= b.y2; y++) {
-      const rowOff = y * W * 4;
-      for (let x = b.x1; x <= b.x2; x++) {
-        const i = rowOff + x * 4;
-        const lum = (refData[i] * 299 + refData[i + 1] * 587 + refData[i + 2] * 114 + 500) / 1000;
-        if (lum < minB) minB = lum;
-        if (lum > maxB) maxB = lum;
+    let bestRange = 0;
+    for (const d of allData) {
+      let minR = 255, maxR = 0, minG = 255, maxG = 0, minBl = 255, maxBl = 0, minL = 255, maxL = 0;
+      for (let y = b.y1; y <= b.y2; y++) {
+        const rowOff = y * W * 4;
+        for (let x = b.x1; x <= b.x2; x++) {
+          const i = rowOff + x * 4;
+          const r = d[i], g = d[i + 1], bl = d[i + 2];
+          if (r < minR) minR = r; if (r > maxR) maxR = r;
+          if (g < minG) minG = g; if (g > maxG) maxG = g;
+          if (bl < minBl) minBl = bl; if (bl > maxBl) maxBl = bl;
+          const lum = (r * 299 + g * 587 + bl * 114 + 500) / 1000;
+          if (lum < minL) minL = lum; if (lum > maxL) maxL = lum;
+        }
       }
+      const r = Math.max(maxR - minR, maxG - minG, maxBl - minBl, maxL - minL);
+      if (r > bestRange) bestRange = r;
+      if (bestRange >= minBrightnessRange) break; // early exit, save time
     }
-    const range = maxB - minB;
-    if (range >= minBrightnessRange) accepted.push(b);
-    else rejected.push({ ...b, reason: `brightness range ${range|0} < ${minBrightnessRange}` });
+    if (bestRange >= minBrightnessRange) accepted.push(b);
+    else rejected.push({ ...b, reason: `channel range ${bestRange|0} < ${minBrightnessRange} (all images)` });
   }
   accepted.rejected = rejected;
   accepted.params = { tolerance, minVotes, nPairs, minArea, maxArea, maxDim, minFill, minAspect, requireEdge, minBrightnessRange };
