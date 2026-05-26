@@ -544,9 +544,9 @@ function findOverlap(a, b, topChrome, botChrome, stripH, step) {
  *  consecutive pairs in the scrollable area. Returns array of bounding boxes
  *  in image coordinates: [{ y1, y2, x1, x2, area }]. */
 function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
-  const tolerance = opts.tolerance ?? 0;
+  const tolerance = opts.tolerance ?? 8;
   const nPairs = images.length - 1;
-  const minVotes = opts.minVotes ?? Math.max(2, Math.floor(nPairs / 2) + 1);
+  const minVotes = opts.minVotes ?? Math.max(2, Math.floor(nPairs / 3));
   const erodeIter = opts.erodeIter ?? 3;
   const minArea = opts.minArea ?? 3000;     // overlay button is at least this many px
   const maxArea = opts.maxArea ?? 40000;
@@ -597,6 +597,7 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
   // Connected components (BFS, 4-connectivity)
   const labels = new Int32Array(W * H);
   const boxes = [];
+  const rejected = [];
   const queue = new Int32Array(W * H);
   let nextLabel = 0;
 
@@ -628,11 +629,15 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
       const fill = area / bboxArea;
       const aspect = Math.min(bw, bh) / Math.max(bw, bh);
       const touchesEdge = (x1 <= edgeMargin) || (x2 >= W - 1 - edgeMargin);
-      if (area < minArea || area > maxArea) continue;
-      if (Math.max(bw, bh) > maxDim) continue;
-      if (fill < minFill) continue;
-      if (aspect < minAspect) continue;
-      if (requireEdge && !touchesEdge) continue;
+      const cand = { y1, y2, x1, x2, area, fill, aspect, bw, bh, touchesEdge };
+      let reason = null;
+      if (area < minArea) reason = `area ${area} < ${minArea}`;
+      else if (area > maxArea) reason = `area ${area} > ${maxArea}`;
+      else if (Math.max(bw, bh) > maxDim) reason = `dim ${Math.max(bw, bh)} > ${maxDim}`;
+      else if (fill < minFill) reason = `fill ${(fill*100).toFixed(0)}% < ${(minFill*100)|0}%`;
+      else if (aspect < minAspect) reason = `aspect ${aspect.toFixed(2)} < ${minAspect}`;
+      else if (requireEdge && !touchesEdge) reason = `not touching edge (x ${x1}-${x2}, W=${W})`;
+      if (reason) { rejected.push({ ...cand, reason }); continue; }
       boxes.push({ y1, y2, x1, x2, area, fill, aspect });
     }
   }
@@ -655,7 +660,8 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
   const minBrightnessRange = opts.minBrightnessRange ?? 80;
   const refImg = images[Math.min(1, images.length - 1)];
   const refData = getImageData(refImg).data;
-  return padded.filter((b) => {
+  const accepted = [];
+  for (const b of padded) {
     let minB = 255, maxB = 0;
     for (let y = b.y1; y <= b.y2; y++) {
       const rowOff = y * W * 4;
@@ -666,8 +672,13 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
         if (lum > maxB) maxB = lum;
       }
     }
-    return (maxB - minB) >= minBrightnessRange;
-  });
+    const range = maxB - minB;
+    if (range >= minBrightnessRange) accepted.push(b);
+    else rejected.push({ ...b, reason: `brightness range ${range|0} < ${minBrightnessRange}` });
+  }
+  accepted.rejected = rejected;
+  accepted.params = { tolerance, minVotes, nPairs, minArea, maxArea, maxDim, minFill, minAspect, requireEdge, minBrightnessRange };
+  return accepted;
 }
 
 /** Patch the output canvas: for each overlay box and each image that contributed
@@ -915,9 +926,14 @@ async function runStitch() {
   if (autoOn) {
     const t0 = performance.now();
     const auto = detectOverlayBoxes(images, top, bot);
-    diag.push(`auto overlay detection: ${auto.length} candidate(s) [${Math.round(performance.now() - t0)}ms]`);
+    const p = auto.params || {};
+    diag.push(`auto overlay detection: ${auto.length} accepted, ${(auto.rejected||[]).length} rejected [${Math.round(performance.now() - t0)}ms]`);
+    diag.push(`  params: pairs=${p.nPairs}, minVotes=${p.minVotes}, tolerance=${p.tolerance}`);
     for (const ov of auto) {
-      diag.push(`  auto: rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} (area=${ov.area}, fill=${(ov.fill*100).toFixed(0)}%)`);
+      diag.push(`  ✓ rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} (area=${ov.area}, fill=${(ov.fill*100).toFixed(0)}%)`);
+    }
+    for (const ov of (auto.rejected || [])) {
+      diag.push(`  ✗ rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} — ${ov.reason}`);
     }
     allOverlays.push(...auto);
   }
