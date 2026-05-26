@@ -551,7 +551,7 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
   const minArea = opts.minArea ?? 1500;     // overlay button is at least this many px
   const maxArea = opts.maxArea ?? 40000;
   const maxDim = opts.maxDim ?? 250;
-  const minFill = opts.minFill ?? 0.35;
+  const minFill = opts.minFill ?? 0.25;
   const minAspect = opts.minAspect ?? 0.5;   // bbox short/long must be at least this
   const requireEdge = opts.requireEdge ?? true; // must touch left or right edge of screen
   const edgeMargin = opts.edgeMargin ?? 100; // "edge" = within this many px of border (WhatsApp chevron floats ~80px in)
@@ -731,9 +731,16 @@ function inpaintOverlays(canvas, images, slices, overlays, topChrome, botChrome)
         const yM2 = yK2 + imgShift;
         // Must be entirely in scrollable area
         if (yM1 < topChrome || yM2 >= Ho - botChrome) continue;
-        // Must be entirely outside this other image's overlay region (same overlay bbox, same screen coords)
-        const inOverlay = (yMin, yMax) => yMax >= ov.y1 && yMin <= ov.y2;
-        if (inOverlay(yM1, yM2)) continue;
+        // Must be entirely outside ALL overlay regions in the same screen
+        // coords. Reading into another overlay's bbox copies that UI element
+        // into the current overlay's position — looks like the chevron is
+        // never erased because we're patching one chevron-region with pixels
+        // from a sibling chevron-region.
+        const xMin = ov.x1, xMax = ov.x2;
+        const conflicts = overlays.some((o) =>
+          yM2 >= o.y1 && yM1 <= o.y2 && xMax >= o.x1 && xMin <= o.x2
+        );
+        if (conflicts) continue;
         chosen = { other, otherImg, otherData: imgData[oi], imgShift };
         break;
       }
