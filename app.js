@@ -554,7 +554,7 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
   const minFill = opts.minFill ?? 0.35;
   const minAspect = opts.minAspect ?? 0.5;   // bbox short/long must be at least this
   const requireEdge = opts.requireEdge ?? true; // must touch left or right edge of screen
-  const edgeMargin = opts.edgeMargin ?? 30;  // "edge" = within this many px of border
+  const edgeMargin = opts.edgeMargin ?? 100; // "edge" = within this many px of border (WhatsApp chevron floats ~80px in)
 
   const W = images[0].w, H = images[0].h;
   const votes = new Uint8Array(W * H);
