@@ -737,7 +737,50 @@ function inpaintOverlays(canvas, images, slices, overlays, topChrome, botChrome)
         chosen = { other, otherImg, otherData: imgData[oi], imgShift };
         break;
       }
-      if (!chosen) continue;
+      if (!chosen) {
+        // Fallback: no clean neighbor available (e.g. chevron near top of
+        // first slice — chat content under it never appears unoccluded in any
+        // later frame). Fill the bbox with the median colour sampled from a
+        // strip just above + just below the bbox, in the same image, within
+        // the same columns. Works well when the underlying region is roughly
+        // uniform chat wallpaper.
+        const sameData = imgData[si];
+        const Ho_self = images[sl.idx].h;
+        const STRIP = 10;
+        const samplesR = [], samplesG = [], samplesB = [];
+        const sampleRow = (y) => {
+          if (y < topChrome || y >= Ho_self - botChrome) return;
+          const rowOff = y * W * 4;
+          for (let x = ov.x1; x <= ov.x2; x++) {
+            const i = rowOff + x * 4;
+            samplesR.push(sameData[i]);
+            samplesG.push(sameData[i + 1]);
+            samplesB.push(sameData[i + 2]);
+          }
+        };
+        for (let dy = 1; dy <= STRIP; dy++) {
+          sampleRow(yK1 - dy);
+          sampleRow(yK2 + dy);
+        }
+        if (samplesR.length === 0) continue;
+        samplesR.sort((a, b) => a - b);
+        samplesG.sort((a, b) => a - b);
+        samplesB.sort((a, b) => a - b);
+        const mid = samplesR.length >> 1;
+        const fillR = samplesR[mid], fillG = samplesG[mid], fillB = samplesB[mid];
+        for (let outY = shift[si] + yK1; outY <= shift[si] + yK2; outY++) {
+          const outRow = outY * W * 4;
+          for (let x = ov.x1; x <= ov.x2; x++) {
+            const oi4 = outRow + x * 4;
+            out.data[oi4]     = fillR;
+            out.data[oi4 + 1] = fillG;
+            out.data[oi4 + 2] = fillB;
+            out.data[oi4 + 3] = 255;
+          }
+        }
+        patched++;
+        continue;
+      }
 
       const { otherData, imgShift } = chosen;
       const Ho = chosen.otherImg.h;
