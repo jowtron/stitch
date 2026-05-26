@@ -219,7 +219,14 @@ button.secondary:hover:not(:disabled) {
   color: var(--muted);
   white-space: pre-wrap;
   min-height: 1em;
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #2a2c33);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
 }
+.status:empty { display: none; }
 .status .err { color: var(--danger); }
 
 .result { margin: 28px 0 0; }

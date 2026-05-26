@@ -546,7 +546,7 @@ function findOverlap(a, b, topChrome, botChrome, stripH, step) {
 function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
   const tolerance = opts.tolerance ?? 8;
   const nPairs = images.length - 1;
-  const minVotes = opts.minVotes ?? Math.max(2, Math.floor(nPairs / 3));
+  const minVotes = opts.minVotes ?? Math.max(2, Math.floor(nPairs / 2) + 1);
   const erodeIter = opts.erodeIter ?? 3;
   const minArea = opts.minArea ?? 3000;     // overlay button is at least this many px
   const maxArea = opts.maxArea ?? 40000;
@@ -927,13 +927,23 @@ async function runStitch() {
     const t0 = performance.now();
     const auto = detectOverlayBoxes(images, top, bot);
     const p = auto.params || {};
-    diag.push(`auto overlay detection: ${auto.length} accepted, ${(auto.rejected||[]).length} rejected [${Math.round(performance.now() - t0)}ms]`);
+    const allRej = auto.rejected || [];
+    // Only show "interesting" rejections: roughly chevron-sized candidates that
+    // failed near a threshold. Drop 1-px noise and giant background blobs.
+    const interesting = allRej.filter((r) =>
+      r.area >= 500 && r.area <= 200000 && Math.max((r.x2 - r.x1 + 1), (r.y2 - r.y1 + 1)) <= 500
+    );
+    diag.push(`auto overlay detection: ${auto.length} accepted, ${allRej.length} rejected (${interesting.length} near-miss) [${Math.round(performance.now() - t0)}ms]`);
     diag.push(`  params: pairs=${p.nPairs}, minVotes=${p.minVotes}, tolerance=${p.tolerance}`);
     for (const ov of auto) {
       diag.push(`  ✓ rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} (area=${ov.area}, fill=${(ov.fill*100).toFixed(0)}%)`);
     }
-    for (const ov of (auto.rejected || [])) {
-      diag.push(`  ✗ rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} — ${ov.reason}`);
+    const shown = interesting.slice(0, 12);
+    for (const ov of shown) {
+      diag.push(`  ✗ rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} (area=${ov.area}) — ${ov.reason}`);
+    }
+    if (interesting.length > shown.length) {
+      diag.push(`  … ${interesting.length - shown.length} more near-miss rejection(s) suppressed`);
     }
     allOverlays.push(...auto);
   }
