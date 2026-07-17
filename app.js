@@ -491,11 +491,32 @@ function median(arr) {
 
 /** Find d in A such that A[d..d+stripH] best matches B[topChrome..topChrome+stripH].
  *  Subsamples both row and column by `step` for speed.
+ *  `screenBoxes` are floating-overlay bboxes in screen coordinates (fixed in
+ *  both images, e.g. the scroll-to-bottom arrow); pixels under them are
+ *  excluded from the comparison so an overlay sitting on the only shared
+ *  content can't corrupt the match.
  *  Returns { d, score } where score is mean absolute diff (0 = perfect). */
-function findOverlap(a, b, topChrome, botChrome, stripH, step) {
+function findOverlap(a, b, topChrome, botChrome, stripH, step, screenBoxes = []) {
   const ad = getImageData(a), bd = getImageData(b);
   const W = ad.width;
   const Ha = ad.height, Hb = bd.height;
+
+  // Per-row overlay lookup (rows not under any box pay nothing in the hot loop)
+  let rowBoxes = null;
+  if (screenBoxes.length) {
+    rowBoxes = new Array(Math.max(Ha, Hb)).fill(null);
+    for (const bx of screenBoxes) {
+      for (let y = Math.max(0, bx.y1); y <= Math.min(rowBoxes.length - 1, bx.y2); y++) {
+        (rowBoxes[y] ||= []).push(bx);
+      }
+    }
+  }
+  const underBox = (y, x) => {
+    const boxes = rowBoxes && rowBoxes[y];
+    if (!boxes) return false;
+    for (const bx of boxes) if (x >= bx.x1 && x <= bx.x2) return true;
+    return false;
+  };
 
   let bsTop = topChrome;
   let actualStrip = stripH;
@@ -512,47 +533,68 @@ function findOverlap(a, b, topChrome, botChrome, stripH, step) {
   const sampledCols = Math.ceil(W / step);
   const sampledRows = Math.ceil(actualStrip / step);
   const stripBuf = new Int16Array(sampledRows * sampledCols * 3);
+  let bValidCnt = 0; // channel-samples in B's strip not under an overlay
   {
     const bp = bd.data;
     let pi = 0;
     for (let y = 0; y < actualStrip; y += step) {
-      const rowOff = (bsTop + y) * W * 4;
+      const yImg = bsTop + y;
+      const rowOff = yImg * W * 4;
       for (let x = 0; x < W; x += step) {
+        if (underBox(yImg, x)) {
+          // Sentinel: this sample is under an overlay in B — never compare it
+          stripBuf[pi++] = -1;
+          stripBuf[pi++] = -1;
+          stripBuf[pi++] = -1;
+          continue;
+        }
         const i = rowOff + x * 4;
         stripBuf[pi++] = bp[i];
         stripBuf[pi++] = bp[i + 1];
         stripBuf[pi++] = bp[i + 2];
+        bValidCnt += 3;
       }
     }
   }
 
   const ap = ad.data;
-  let bestD = -1, bestScore = Infinity;
-  const totalSamples = sampledRows * sampledCols * 3;
-  // bestSum is the sum-of-abs-diffs corresponding to bestScore
-  let bestSum = Infinity;
+  let bestD = -1;
+  // bestSum/bestCnt correspond to the best (lowest mean-diff) candidate so far
+  let bestSum = Infinity, bestCnt = 0;
 
   for (let d = dMin; d <= dMax; d++) {
-    let sum = 0;
+    let sum = 0, cnt = 0;
     let pi = 0;
     // Early exit if we exceed bestSum (Manhattan distance is monotone)
     for (let y = 0; y < actualStrip; y += step) {
-      const rowOff = (d + y) * W * 4;
+      const yA = d + y;
+      const rowOff = yA * W * 4;
+      const aBoxes = rowBoxes && rowBoxes[yA];
       for (let x = 0; x < W; x += step) {
+        if (stripBuf[pi] < 0) { pi += 3; continue; }
+        if (aBoxes) {
+          let skip = false;
+          for (const bx of aBoxes) if (x >= bx.x1 && x <= bx.x2) { skip = true; break; }
+          if (skip) { pi += 3; continue; }
+        }
         const i = rowOff + x * 4;
         sum += Math.abs(ap[i]     - stripBuf[pi++]);
         sum += Math.abs(ap[i + 1] - stripBuf[pi++]);
         sum += Math.abs(ap[i + 2] - stripBuf[pi++]);
+        cnt += 3;
       }
       if (sum >= bestSum) break;
     }
-    if (sum < bestSum) {
+    // Require at least half the strip's valid samples compared, so a candidate
+    // that skipped nearly everything can't win on a tiny raw sum.
+    if (cnt >= bValidCnt / 2 && sum < bestSum) {
       bestSum = sum;
+      bestCnt = cnt;
       bestD = d;
     }
   }
-  bestScore = bestSum / totalSamples;
-  return { d: bestD, score: bestScore };
+  if (!bestCnt) return { d: null, score: Infinity };
+  return { d: bestD, score: bestSum / bestCnt };
 }
 
 // ----- Floating UI overlay detection (e.g. WhatsApp scroll-to-bottom chevron) -----
@@ -696,7 +738,7 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
 /** Patch the output canvas: for each overlay box and each image that contributed
  *  rows containing that overlay, copy clean pixels from a neighboring image whose
  *  equivalent rows are NOT under its own overlay. */
-function inpaintOverlays(canvas, images, slices, overlays, topChrome, botChrome) {
+function inpaintOverlays(canvas, images, slices, overlays, topChrome, botChrome, weakBoundary = []) {
   const ctx = canvas.getContext("2d");
   const W = canvas.width, H = canvas.height;
   const out = ctx.getImageData(0, 0, W, H);
@@ -721,6 +763,13 @@ function inpaintOverlays(canvas, images, slices, overlays, topChrome, botChrome)
       for (const delta of order) {
         const oi = si + delta;
         if (oi < 0 || oi >= slices.length) continue;
+        // Never read donor rows across a weak seam — the relative alignment
+        // between those slices is untrusted, so the copy would misregister.
+        let crossesWeak = false;
+        for (let j = Math.min(si, oi) + 1; j <= Math.max(si, oi); j++) {
+          if (weakBoundary[slices[j].idx]) { crossesWeak = true; break; }
+        }
+        if (crossesWeak) continue;
         const other = slices[oi];
         if (other.idx === sl.idx) continue;
         const otherImg = images[other.idx];
@@ -891,20 +940,65 @@ async function runStitch() {
     await new Promise((r) => setTimeout(r, 10));
   }
 
-  // Compute slices
-  const slices = [{ idx: 0, start: 0, end: images[0].h - bot }];
   const diag = [];
+
+  // Detect floating UI overlays (auto + manual) up front: their pixels are
+  // excluded from overlap matching (an arrow sitting on the only shared
+  // content otherwise corrupts the match) and they're inpainted after
+  // compositing.
+  const autoOn = $("#mask-overlays").checked && images.length >= 3;
+  const allOverlays = [];
+  if (autoOn) {
+    const t0 = performance.now();
+    const auto = detectOverlayBoxes(images, top, bot);
+    diag.push(`auto overlay detection: ${auto.length} candidate(s) [${Math.round(performance.now() - t0)}ms]`);
+    for (const ov of auto) {
+      diag.push(`  auto: rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} (area=${ov.area}, fill=${(ov.fill*100).toFixed(0)}%)`);
+    }
+    allOverlays.push(...auto);
+  }
+  if (state.manualMasks.length) {
+    diag.push(`manual masks: ${state.manualMasks.length} box(es)`);
+    allOverlays.push(...state.manualMasks);
+  }
+  setStatus(diag.join("\n"));
+  await new Promise((r) => setTimeout(r, 10));
+
+  // Pass 1: match every consecutive pair.
+  const matches = [];
+  for (let k = 1; k < images.length; k++) {
+    const t0 = performance.now();
+    const m = findOverlap(images[k - 1], images[k], top, bot, stripH, step, allOverlays);
+    m.dt = Math.round(performance.now() - t0);
+    matches.push(m);
+  }
+
+  // Adaptive weak-match threshold: a real match scores close to the set's
+  // median; a score several times worse is a wrong alignment even when it
+  // looks acceptable in absolute terms.
+  const sortedScores = matches.map((m) => m.score).filter((s) => isFinite(s)).sort((a, b) => a - b);
+  const medScore = sortedScores.length
+    ? (sortedScores.length % 2
+        ? sortedScores[sortedScores.length >> 1]
+        : (sortedScores[sortedScores.length / 2 - 1] + sortedScores[sortedScores.length / 2]) / 2)
+    : Infinity;
+  const weakThresh = Math.min(30, Math.max(8, 6 * medScore));
+  diag.push(`median pair score ${medScore.toFixed(2)} → weak-match threshold ${weakThresh.toFixed(1)}`);
+
+  // Pass 2: compute slices. weakBoundary[k] means the alignment between
+  // image k-1 and image k is untrusted (content is appended in full there).
+  const slices = [{ idx: 0, start: 0, end: images[0].h - bot }];
+  const weakBoundary = new Array(images.length).fill(false);
 
   for (let k = 1; k < images.length; k++) {
     const a = images[k - 1], b = images[k];
-    const t0 = performance.now();
-    const { d, score } = findOverlap(a, b, top, bot, stripH, step);
-    const dt = Math.round(performance.now() - t0);
+    const { d, score, dt } = matches[k - 1];
 
     let firstNew;
-    if (d === null || score > 30) {
+    if (d === null || score > weakThresh) {
       firstNew = top;
-      diag.push(`pair ${k - 1}→${k}: WEAK match (d=${d}, score=${score.toFixed(2)}); appending without overlap removal [${dt}ms]`);
+      weakBoundary[k] = true;
+      diag.push(`pair ${k - 1}→${k}: ⚠ WEAK match (d=${d}, score=${score.toFixed(2)}) — images ${k} and ${k + 1} don't share enough clean overlap. Appending in full; content may repeat at this seam. More overlap between screenshots avoids this. [${dt}ms]`);
     } else {
       firstNew = top + ((a.h - bot) - d);
       diag.push(`pair ${k - 1}→${k}: d=${d}, score=${score.toFixed(2)}, first_new=${firstNew} [${dt}ms]`);
@@ -936,25 +1030,10 @@ async function runStitch() {
     ctx.drawImage(images[sl.idx].bitmap, 0, sl.start, w0, h, 0, sl.outputStart, w0, h);
   }
 
-  // Floating UI overlay masking: auto-detect + manual
-  const autoOn = $("#mask-overlays").checked && images.length >= 3;
-  const allOverlays = [];
-  if (autoOn) {
-    const t0 = performance.now();
-    const auto = detectOverlayBoxes(images, top, bot);
-    diag.push(`auto overlay detection: ${auto.length} candidate(s) [${Math.round(performance.now() - t0)}ms]`);
-    for (const ov of auto) {
-      diag.push(`  auto: rows ${ov.y1}-${ov.y2}, cols ${ov.x1}-${ov.x2} (area=${ov.area}, fill=${(ov.fill*100).toFixed(0)}%)`);
-    }
-    allOverlays.push(...auto);
-  }
-  if (state.manualMasks.length) {
-    diag.push(`manual masks: ${state.manualMasks.length} box(es)`);
-    allOverlays.push(...state.manualMasks);
-  }
+  // Floating UI overlay inpainting (boxes were detected before matching)
   if (allOverlays.length) {
     const t1 = performance.now();
-    const { patched, unpatched } = inpaintOverlays(canvas, images, slices, allOverlays, top, bot);
+    const { patched, unpatched } = inpaintOverlays(canvas, images, slices, allOverlays, top, bot, weakBoundary);
     diag.push(`patched ${patched} region(s) [${Math.round(performance.now() - t1)}ms]`);
     for (const u of unpatched) {
       diag.push(`  ⚠ overlay in image ${u.slice + 1} (rows ${u.y1}-${u.y2}) could not be patched — no other frame shows that content. If it's the last screenshot, retake it scrolled to the very bottom so the arrow is gone.`);
