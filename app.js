@@ -628,11 +628,17 @@ function detectOverlayBoxes(images, topChrome, botChrome, opts = {}) {
       const fill = area / bboxArea;
       const aspect = Math.min(bw, bh) / Math.max(bw, bh);
       const touchesEdge = (x1 <= edgeMargin) || (x2 >= W - 1 - edgeMargin);
+      // Messenger's scroll-to-bottom arrow floats horizontally centered in the
+      // lower half of the scroll area, so centered boxes there are also allowed.
+      const boxCx = (x1 + x2) / 2;
+      const boxCy = (y1 + y2) / 2;
+      const scrollMid = topChrome + (H - topChrome - botChrome) / 2;
+      const centeredLow = Math.abs(boxCx - W / 2) <= W * 0.1 && boxCy > scrollMid;
       if (area < minArea || area > maxArea) continue;
       if (Math.max(bw, bh) > maxDim) continue;
       if (fill < minFill) continue;
       if (aspect < minAspect) continue;
-      if (requireEdge && !touchesEdge) continue;
+      if (requireEdge && !touchesEdge && !centeredLow) continue;
       boxes.push({ y1, y2, x1, x2, area, fill, aspect });
     }
   }
@@ -684,6 +690,7 @@ function inpaintOverlays(canvas, images, slices, overlays, topChrome, botChrome)
   const shift = slices.map((sl) => sl.outputStart - sl.start);
 
   let patched = 0;
+  const unpatched = [];
   for (const ov of overlays) {
     for (let si = 0; si < slices.length; si++) {
       const sl = slices[si];
@@ -715,7 +722,10 @@ function inpaintOverlays(canvas, images, slices, overlays, topChrome, botChrome)
         chosen = { other, otherImg, otherData: imgData[oi], imgShift };
         break;
       }
-      if (!chosen) continue;
+      if (!chosen) {
+        unpatched.push({ slice: si, y1: yK1, y2: yK2 });
+        continue;
+      }
 
       const { otherData, imgShift } = chosen;
       const Ho = chosen.otherImg.h;
@@ -739,7 +749,7 @@ function inpaintOverlays(canvas, images, slices, overlays, topChrome, botChrome)
     }
   }
   ctx.putImageData(out, 0, 0);
-  return patched;
+  return { patched, unpatched };
 }
 
 // ----- Moving overlay: right-edge scroll indicator -----
@@ -927,8 +937,11 @@ async function runStitch() {
   }
   if (allOverlays.length) {
     const t1 = performance.now();
-    const patched = inpaintOverlays(canvas, images, slices, allOverlays, top, bot);
+    const { patched, unpatched } = inpaintOverlays(canvas, images, slices, allOverlays, top, bot);
     diag.push(`patched ${patched} region(s) [${Math.round(performance.now() - t1)}ms]`);
+    for (const u of unpatched) {
+      diag.push(`  ⚠ overlay in image ${u.slice + 1} (rows ${u.y1}-${u.y2}) could not be patched — no other frame shows that content. If it's the last screenshot, retake it scrolled to the very bottom so the arrow is gone.`);
+    }
     setStatus(diag.join("\n"));
     await new Promise((r) => setTimeout(r, 10));
   }

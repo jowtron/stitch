@@ -8,3 +8,4 @@ node_modules/
 # Source icon masters; only resized versions in icons/ are committed
 stitch.png
 stitchfavicon.png
+test-messenger/
