@@ -17,6 +17,8 @@ const state = {
   manualMasks: [],
   // Last successful stitch canvas — used for on-the-fly format re-encoding
   lastCanvas: null,
+  // Last encoded output as a File — used by the share/save-to-photos button
+  lastFile: null,
 };
 
 // Format profiles: dropdown value → { mime, encoder } where encoder is
@@ -40,6 +42,7 @@ const status = $("#status");
 const result = $("#result");
 const output = $("#output");
 const downloadBtn = $("#download");
+const shareBtn = $("#share");
 const stitchBtn = $("#stitch");
 const clearBtn = $("#clear");
 const countLabel = $("#count");
@@ -56,6 +59,16 @@ fileInput.addEventListener("change", (e) => addFiles(e.target.files));
 clearBtn.addEventListener("click", () => { state.images = []; renderThumbs(); renderResult(null); setStatus(""); });
 stitchBtn.addEventListener("click", runStitch);
 $("#define-masks").addEventListener("click", openMaskModal);
+// Native share sheet — on iOS this includes "Save Image" (photo library).
+// Must be called directly from the click gesture, so share the cached file.
+shareBtn.addEventListener("click", async () => {
+  if (!state.lastFile) return;
+  try {
+    await navigator.share({ files: [state.lastFile] });
+  } catch (err) {
+    if (err.name !== "AbortError") setStatus(`Share failed: ${err.message}`, true);
+  }
+});
 $("#mask-done").addEventListener("click", () => $("#mask-modal").hidden = true);
 updateMaskCount();
 
@@ -171,6 +184,8 @@ function renderResult(blobUrl, meta) {
     output.src = "";
     if (downloadBtn.href.startsWith("blob:")) URL.revokeObjectURL(downloadBtn.href);
     downloadBtn.removeAttribute("href");
+    state.lastFile = null;
+    shareBtn.hidden = true;
     return;
   }
   result.hidden = false;
@@ -280,6 +295,8 @@ async function reencodeOutput() {
     output.src = url;
     downloadBtn.href = url;
     downloadBtn.download = `stitched.${extensionFor(blob.type)}`;
+    state.lastFile = new File([blob], downloadBtn.download, { type: blob.type });
+    shareBtn.hidden = !(navigator.canShare && navigator.canShare({ files: [state.lastFile] }));
     const sizeKb = Math.round(blob.size / 1024);
     const variantLabel = profileKey === "jpeg-quality" ? "JPEG (mozjpeg)"
                        : profileKey === "jpeg-fast"    ? "JPEG (fast)"
