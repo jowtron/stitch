@@ -8,6 +8,10 @@
 
 const $ = (sel) => document.querySelector(sel);
 
+// iPadOS reports itself as Macintosh; the touch check tells them apart.
+const IS_IOS = /iPhone|iPod/.test(navigator.userAgent) ||
+  (/iPad|Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+
 // ----- State -----
 
 const state = {
@@ -39,6 +43,8 @@ const fileInput = $("#file");
 const thumbs = $("#thumbs");
 const controls = $("#controls");
 const status = $("#status");
+const statusWrap = $("#status-wrap");
+const statusSummary = $("#status-summary");
 const result = $("#result");
 const output = $("#output");
 const downloadBtn = $("#download");
@@ -170,12 +176,24 @@ function renderThumbs() {
 
 function setStatus(msg, isError = false) {
   status.innerHTML = "";
-  if (msg) {
-    const span = document.createElement("span");
-    if (isError) span.className = "err";
-    span.textContent = msg;
-    status.appendChild(span);
+  statusWrap.hidden = !msg;
+  if (!msg) {
+    statusSummary.textContent = "";
+    return;
   }
+  const span = document.createElement("span");
+  if (isError) span.className = "err";
+  span.textContent = msg;
+  status.appendChild(span);
+  // Collapsed one-line summary: latest line, plus a warning count if any
+  const lines = msg.split("\n").filter((l) => l.trim());
+  const warns = lines.filter((l) => l.includes("⚠")).length;
+  const last = lines[lines.length - 1] || "";
+  statusSummary.textContent = warns && !last.includes("⚠")
+    ? `${last} · ⚠ ${warns} warning${warns === 1 ? "" : "s"} — tap for log`
+    : last;
+  statusSummary.classList.toggle("err", isError);
+  if (isError) statusWrap.open = true;
 }
 
 function renderResult(blobUrl, meta) {
@@ -184,6 +202,7 @@ function renderResult(blobUrl, meta) {
     output.src = "";
     if (downloadBtn.href.startsWith("blob:")) URL.revokeObjectURL(downloadBtn.href);
     downloadBtn.removeAttribute("href");
+    downloadBtn.style.display = "";
     state.lastFile = null;
     shareBtn.hidden = true;
     return;
@@ -296,7 +315,15 @@ async function reencodeOutput() {
     downloadBtn.href = url;
     downloadBtn.download = `stitched.${extensionFor(blob.type)}`;
     state.lastFile = new File([blob], downloadBtn.download, { type: blob.type });
-    shareBtn.hidden = !(navigator.canShare && navigator.canShare({ files: [state.lastFile] }));
+    const canShareFile = !!(navigator.canShare && navigator.canShare({ files: [state.lastFile] }));
+    shareBtn.hidden = !canShareFile;
+    // iOS Safari's blob "View"/download handling is unreliable for very large
+    // outputs (WebKitBlobResource errors) — route saving through the native
+    // share sheet instead, which covers both Photos and Files.
+    if (canShareFile && IS_IOS) {
+      downloadBtn.style.display = "none";
+      shareBtn.textContent = "Save / Share…";
+    }
     const sizeKb = Math.round(blob.size / 1024);
     const variantLabel = profileKey === "jpeg-quality" ? "JPEG (mozjpeg)"
                        : profileKey === "jpeg-fast"    ? "JPEG (fast)"
