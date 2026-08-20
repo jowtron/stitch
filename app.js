@@ -81,6 +81,7 @@ updateMaskCount();
 // Output format controls — AVIF stays in the list even if native encoding is missing;
 // we lazy-load a WASM encoder fallback when needed.
 $("#format").addEventListener("change", reencodeOutput);
+$("#layout").addEventListener("change", reencodeOutput);
 $("#quality").addEventListener("input", () => {
   $("#quality-val").textContent = Math.round(parseFloat($("#quality").value) * 100) + "%";
 });
@@ -225,6 +226,144 @@ function updateQualityRowVisibility() {
   $("#quality-row").style.display = isLossy(mime) ? "inline-flex" : "none";
 }
 
+// Container-format dimension ceilings. Past these the encoder doesn't error —
+// canvas.toBlob just hands back null. JPEG stores width/height in 16 bits,
+// WebP in 14, AV1 in 16. PNG's are 32-bit, which is why a 60k-row stitch will
+// only ever come out as PNG at full size.
+const FORMAT_MAX_DIM = {
+  "image/png":  Infinity,
+  "image/jpeg": 65535,
+  "image/webp": 16383,
+  "image/avif": 65536,
+};
+
+function maxDimFor(mime) { return FORMAT_MAX_DIM[mime] ?? Infinity; }
+
+// Scale factor needed to make `canvas` representable in `mime` (1 = fits as-is).
+function fitScaleFor(canvas, mime) {
+  const max = maxDimFor(mime);
+  return Math.min(1, max / canvas.width, max / canvas.height);
+}
+
+// Downscale to fit the format ceiling. Big reductions go in halving steps —
+// one-shot drawImage of a 60k-row source turns small text to mush.
+function fitCanvasToFormat(canvas, mime) {
+  const scale = fitScaleFor(canvas, mime);
+  if (scale >= 1) return { canvas, scale: 1 };
+
+  let cur = canvas;
+  let remaining = scale;
+  while (remaining < 0.5) {
+    cur = scaleCanvas(cur, Math.max(1, Math.round(cur.width / 2)), Math.max(1, Math.round(cur.height / 2)));
+    remaining *= 2;
+  }
+  const w = Math.max(1, Math.floor(canvas.width * scale));
+  const h = Math.max(1, Math.floor(canvas.height * scale));
+  if (cur.width !== w || cur.height !== h) cur = scaleCanvas(cur, w, h);
+  return { canvas: cur, scale };
+}
+
+// Reflow a very tall stitch into N side-by-side columns, reading top-to-bottom
+// then left-to-right. This is the lossless way past the format ceilings: a
+// 1170x65774 strip is unencodable as JPEG, but the same pixels as 5 columns
+// (5850x13155) fit every format with room to spare — and are actually readable.
+const COLUMN_GAP = 24;
+
+function columnLayoutSize(srcW, srcH, cols) {
+  return {
+    w: cols * srcW + (cols - 1) * COLUMN_GAP,
+    h: Math.ceil(srcH / cols),
+  };
+}
+
+function columnizeCanvas(src, cols) {
+  if (cols <= 1) return src;
+  const { w, h } = columnLayoutSize(src.width, src.height, cols);
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext("2d");
+  // Gap colour is sampled from the stitch's own background so the seams don't
+  // glare on a dark-mode chat.
+  ctx.fillStyle = sampleBackground(src);
+  ctx.fillRect(0, 0, w, h);
+  for (let c = 0; c < cols; c++) {
+    const y = c * h;
+    const sliceH = Math.min(h, src.height - y);
+    if (sliceH <= 0) break;
+    ctx.drawImage(src, 0, y, src.width, sliceH, c * (src.width + COLUMN_GAP), 0, src.width, sliceH);
+  }
+  return out;
+}
+
+function sampleBackground(canvas) {
+  try {
+    const d = canvas.getContext("2d").getImageData(2, 2, 1, 1).data;
+    return `rgb(${d[0]},${d[1]},${d[2]})`;
+  } catch {
+    return "#000";
+  }
+}
+
+// Fewest columns that make the stitch representable in `mime` at full resolution.
+// Returns 0 if no column count up to the cap gets there.
+function autoColumnsFor(canvas, mime) {
+  const max = maxDimFor(mime);
+  if (max === Infinity) return 1;
+  for (let cols = 1; cols <= 16; cols++) {
+    const { w, h } = columnLayoutSize(canvas.width, canvas.height, cols);
+    if (w <= max && h <= max) return cols;
+  }
+  return 0;
+}
+
+// Resolve the #layout dropdown to a concrete column count for this format.
+function resolveColumns(canvas, mime) {
+  const sel = $("#layout");
+  const val = sel ? sel.value : "1";
+  if (val === "auto") return autoColumnsFor(canvas, mime) || 1;
+  return Math.max(1, parseInt(val, 10) || 1);
+}
+
+function scaleCanvas(src, w, h) {
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(src, 0, 0, w, h);
+  return out;
+}
+
+// Warn on the format row when the current pick can't hold the stitch at 1:1.
+function updateFormatFitHint() {
+  const hint = $("#format-hint");
+  if (!hint) return;
+  const canvas = state.lastCanvas;
+  if (!canvas) { hint.hidden = true; return; }
+  const mime = profileMime($("#format").value);
+  const max = maxDimFor(mime);
+  const cols = resolveColumns(canvas, mime);
+  const laid = columnLayoutSize(canvas.width, canvas.height, cols);
+  const scale = Math.min(1, max / laid.w, max / laid.h);
+
+  if (scale >= 1) {
+    if (cols <= 1) { hint.hidden = true; return; }
+    hint.hidden = false;
+    hint.textContent = `${canvas.height.toLocaleString()}px is past ${extensionFor(mime).toUpperCase()}'s ` +
+      `${max.toLocaleString()}px limit, so this saves as ${cols} columns (${laid.w.toLocaleString()}\u00d7${laid.h.toLocaleString()}) ` +
+      `— every pixel kept. Pick PNG for one continuous strip.`;
+    return;
+  }
+
+  const w = Math.floor(laid.w * scale), h = Math.floor(laid.h * scale);
+  hint.hidden = false;
+  hint.textContent = `${extensionFor(mime).toUpperCase()} maxes out at ${max.toLocaleString()}px per side — ` +
+    `even at ${cols} column(s) this needs scaling to ${w.toLocaleString()}\u00d7${h.toLocaleString()} (${Math.round(scale * 100)}%). ` +
+    `Add more columns, or save as PNG for full size.`;
+}
+
 // Lazy-loaded WASM encoders (loaded on first use).
 const wasmEncoders = {
   "image/webp": null,
@@ -268,44 +407,72 @@ async function encodeViaWasm(canvas, mime, quality) {
   return new Blob([buf], { type: mime });
 }
 
-async function encodeCanvas(profileKey, canvas, quality) {
+// Returns { blob, canvas, scale } — canvas/scale describe what was actually
+// encoded, which may be a downscale of the input if the format can't hold it.
+async function encodeCanvas(profileKey, srcCanvas, quality) {
   const profile = FORMAT_PROFILES[profileKey] || FORMAT_PROFILES.png;
   const { mime, encoder } = profile;
 
+  // Reflow into columns first — that's lossless, so it can remove the need to
+  // downscale entirely. Scaling is only the fallback if even columns don't fit.
+  const cols = resolveColumns(srcCanvas, mime);
+  const laid = columnizeCanvas(srcCanvas, cols);
+  if (cols > 1) {
+    setStatus(`Laying out ${cols} columns \u2014 ${laid.width}\u00d7${laid.height}px, full resolution.`);
+  }
+
+  const fit = fitCanvasToFormat(laid, mime);
+  const canvas = fit.canvas;
+  if (fit.scale < 1) {
+    setStatus(`${extensionFor(mime).toUpperCase()} can't exceed ${maxDimFor(mime).toLocaleString()}px per side \u2014 ` +
+      `scaling ${laid.width}\u00d7${laid.height} down to ${canvas.width}\u00d7${canvas.height} to encode. ` +
+      `Set Layout to Auto, or choose PNG, to keep full resolution.`, true);
+  }
+  const done = (blob) => ({ blob, canvas, scale: fit.scale, cols });
+
   if (encoder === "wasm-mozjpeg") {
     setStatus(`Encoding with mozjpeg — slower but better quality at the same file size…`);
-    return await encodeViaWasm(canvas, "image/jpeg", quality);
+    return done(await encodeViaWasm(canvas, "image/jpeg", quality));
   }
 
   if (encoder === "native") {
-    return await new Promise((res) => canvas.toBlob(res, mime, quality));
+    return done(await new Promise((res) => canvas.toBlob(res, mime, quality)));
   }
 
   // "auto": try native first; if browser silently returns wrong type, fall back to WASM
   const native = await new Promise((res) => canvas.toBlob(res, mime, quality));
-  if (native && native.type === mime) return native;
+  if (native && native.type === mime) return done(native);
   if (mime === "image/webp" || mime === "image/avif") {
     setStatus(`Encoding ${mime.split("/")[1].toUpperCase()} via WASM (your browser can't encode this natively)…`);
-    return await encodeViaWasm(canvas, mime, quality);
+    return done(await encodeViaWasm(canvas, mime, quality));
   }
-  return native;
+  return done(native);
 }
 
 async function reencodeOutput() {
   updateQualityRowVisibility();
+  updateFormatFitHint();
   if (!state.lastCanvas) return;
   const profileKey = $("#format").value;
   const expectedMime = profileMime(profileKey);
   const quality = parseFloat($("#quality").value);
   const canvas = state.lastCanvas;
+  let encodedCanvas = canvas, encodedScale = 1, encodedCols = 1;
   downloadBtn.style.pointerEvents = "none";
   downloadBtn.style.opacity = "0.5";
   let blob;
   try {
     const t0 = performance.now();
-    blob = await encodeCanvas(profileKey, canvas, quality);
+    const enc = await encodeCanvas(profileKey, canvas, quality);
+    blob = enc.blob;
+    encodedCanvas = enc.canvas;
+    encodedScale = enc.scale;
+    encodedCols = enc.cols;
     const dt = Math.round(performance.now() - t0);
-    if (!blob) throw new Error("encoder returned null");
+    if (!blob) {
+      throw new Error(`${extensionFor(expectedMime).toUpperCase()} encoder returned nothing for ` +
+        `${encodedCanvas.width}\u00d7${encodedCanvas.height}px — the image is likely past what this browser can encode`);
+    }
     if (blob.type !== expectedMime) {
       setStatus(`Browser returned ${blob.type} instead of ${expectedMime}. Try a different format.`, true);
     }
@@ -328,7 +495,11 @@ async function reencodeOutput() {
     const variantLabel = profileKey === "jpeg-quality" ? "JPEG (mozjpeg)"
                        : profileKey === "jpeg-fast"    ? "JPEG (fast)"
                        : blob.type.split("/")[1].toUpperCase();
-    const meta = `${canvas.width}×${canvas.height}px · ${sizeKb} KB · ${variantLabel}${isLossy(blob.type) ? ` @${Math.round(quality*100)}%` : ""} · ${dt}ms`;
+    const dims = encodedScale < 1
+      ? `${canvas.width}×${canvas.height} → ${encodedCanvas.width}×${encodedCanvas.height}px (${Math.round(encodedScale*100)}%)`
+      : `${canvas.width}×${canvas.height}px`;
+    const colNote = encodedCols > 1 ? ` · ${encodedCols} cols` : "";
+    const meta = `${dims}${colNote} · ${sizeKb} KB · ${variantLabel}${isLossy(blob.type) ? ` @${Math.round(quality*100)}%` : ""} · ${dt}ms`;
     document.querySelector(".result-meta").textContent = meta;
   } catch (err) {
     setStatus(`Encoding failed: ${err.message}. Falling back to PNG.`, true);

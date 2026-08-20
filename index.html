@@ -76,6 +76,18 @@
               <option value="avif">AVIF</option>
             </select>
           </label>
+          <label>
+            Layout
+            <select id="layout">
+              <option value="auto">Auto (fit format)</option>
+              <option value="1">Single column</option>
+              <option value="2">2 columns</option>
+              <option value="3">3 columns</option>
+              <option value="4">4 columns</option>
+              <option value="5">5 columns</option>
+              <option value="6">6 columns</option>
+            </select>
+          </label>
           <label id="quality-row">
             Quality <input id="quality" type="range" min="0.3" max="1" step="0.05" value="0.9" />
             <span id="quality-val">90%</span>
@@ -83,6 +95,7 @@
           <a id="download" class="btn" download="stitched.png">Download</a>
           <button id="share" hidden>Save to Photos…</button>
         </div>
+        <p id="format-hint" class="format-hint" hidden></p>
       </div>
       <div class="result-img">
         <img id="output" alt="stitched output" />

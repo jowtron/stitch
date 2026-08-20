@@ -370,3 +370,11 @@ footer {
   text-align: center;
 }
 footer a { color: var(--muted); }
+
+.format-hint {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: #b8860b;
+  max-width: 60ch;
+}
